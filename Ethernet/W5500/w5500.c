@@ -53,6 +53,7 @@
 //*****************************************************************************
 //#include <stdio.h>
 #include "w5500.h"
+#include "wiz_wait.h"
 
 #define _W5500_SPI_VDM_OP_          0x00
 #define _W5500_SPI_FDM_OP_LEN1_     0x01
@@ -173,8 +174,10 @@ void     WIZCHIP_WRITE_BUF(uint32_t AddrSel, uint8_t* pBuf, uint16_t len) {
 
 uint16_t getSn_TX_FSR(uint8_t sn) {
     uint16_t val = 0, val1 = 0;
+    WIZ_DEADLINE_DECL();
 
     do {
+        WIZ_DEADLINE_CHECK_RET(0U);
         val1 = WIZCHIP_READ(Sn_TX_FSR(sn));
         val1 = (val1 << 8) + WIZCHIP_READ(WIZCHIP_OFFSET_INC(Sn_TX_FSR(sn), 1));
         if (val1 != 0) {
@@ -188,8 +191,10 @@ uint16_t getSn_TX_FSR(uint8_t sn) {
 
 uint16_t getSn_RX_RSR(uint8_t sn) {
     uint16_t val = 0, val1 = 0;
+    WIZ_DEADLINE_DECL();
 
     do {
+        WIZ_DEADLINE_CHECK_RET(0U);
         val1 = WIZCHIP_READ(Sn_RX_RSR(sn));
         val1 = (val1 << 8) + WIZCHIP_READ(WIZCHIP_OFFSET_INC(Sn_RX_RSR(sn), 1));
         if (val1 != 0) {

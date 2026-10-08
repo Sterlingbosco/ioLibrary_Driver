@@ -92,6 +92,11 @@ enum {
     @param s   - socket number
     @param buf - buffer for processing DHCP message
 */
+/* PLCBA_CPU: minimum size of the buffer given to DHCP_init(). It must hold a
+ * whole datagram of the DHCP socket RX buffer (1 KB in the PLCBA_CPU socket
+ * map): parseDHCPMSG() never reads more than this. */
+#define DHCP_BUF_MIN   1024U
+
 void DHCP_init(uint8_t s, uint8_t * buf);
 
 /*

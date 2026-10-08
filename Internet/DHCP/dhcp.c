@@ -665,27 +665,36 @@ int8_t parseDHCPMSG(void) {
     uint8_t * e;
     uint8_t type = 0;
     uint8_t opt_len;
+    int32_t rlen;
 #if 1
     // 20231019 taylor
     uint8_t addr_len;
 #endif
 
     if ((len = getSn_RX_RSR(DHCP_SOCKET)) > 0) {
-#if 1
-        // 20231019 taylor//teddy 240122
-#if ((_WIZCHIP_ == 6100) || (_WIZCHIP_ == 6300))
-        len = recvfrom(DHCP_SOCKET, (uint8_t *)pDHCPMSG, len, svr_addr, &svr_port, &addr_len);
-#else
-        len = recvfrom(DHCP_SOCKET, (uint8_t *)pDHCPMSG, len, svr_addr, &svr_port);
-#endif
-#else
-        len = recvfrom(DHCP_SOCKET, (uint8_t *)pDHCPMSG, len, svr_addr, &svr_port);
-#endif
-#ifdef _DHCP_DEBUG_
-        printf("DHCP message : %d.%d.%d.%d(%d) %d received. \r\n", svr_addr[0], svr_addr[1], svr_addr[2], svr_addr[3], svr_port, len);
-#endif
+        /* PLCBA_CPU: never more than the caller's buffer. DHCP_BUF_MIN covers
+         * the whole socket RX buffer, so one datagram always fits and none is
+         * left half-read. Runt, oversized or failed reads are ignored. */
+        if (len > DHCP_BUF_MIN) {
+            len = DHCP_BUF_MIN;
+        }
+        rlen = recvfrom(DHCP_SOCKET, (uint8_t *)pDHCPMSG, len, svr_addr, &svr_port);
+        if ((rlen < 240) || (rlen > RIP_MSG_SIZE)) {
+            return 0;
+        }
+        len = (uint16_t)rlen;
     } else {
         return 0;
+    }
+    {
+        /* PLCBA_CPU: only a BOOTREPLY to our own transaction (xid written
+         * big-endian by makeDHCPMSG) is parsed. */
+        const uint8_t *x = (const uint8_t *)&pDHCPMSG->xid;
+        if ((pDHCPMSG->op != DHCP_BOOTREPLY) ||
+            (x[0] != (uint8_t)(DHCP_XID >> 24)) || (x[1] != (uint8_t)(DHCP_XID >> 16)) ||
+            (x[2] != (uint8_t)(DHCP_XID >> 8))  || (x[3] != (uint8_t)DHCP_XID)) {
+            return 0;
+        }
     }
     if (svr_port == DHCP_SERVER_PORT) {
         // compare mac address
@@ -707,81 +716,58 @@ int8_t parseDHCPMSG(void) {
                 return 0;
             }
         }
-        p = (uint8_t *)(&pDHCPMSG->op);
-        p = p + 240;      // 240 = sizeof(RIP_MSG) + MAGIC_COOKIE size in RIP_MSG.opt - sizeof(RIP_MSG.opt)
-        e = p + (len - 240);
-
+        p = (uint8_t *)(&pDHCPMSG->op) + 240;   /* fixed header + magic cookie */
+        e = (uint8_t *)(&pDHCPMSG->op) + len;   /* 240 <= len <= RIP_MSG_SIZE, checked above */
+        /* PLCBA_CPU: every option is bounds-checked against the message end. */
         while (p < e) {
-
-            switch (*p) {
-
-            case endOption :
-                p = e;   // for break while(p < e)
+            if (*p == endOption) {
                 break;
-            case padOption :
+            }
+            if (*p == padOption) {
                 p++;
+                continue;
+            }
+            if ((e - p) < 2) {
                 break;
-            case dhcpMessageType :
-                p++;
-                p++;
-                type = *p++;
-                break;
-            case subnetMask :
-                p++;
-                p++;
-                DHCP_allocated_sn[0] = *p++;
-                DHCP_allocated_sn[1] = *p++;
-                DHCP_allocated_sn[2] = *p++;
-                DHCP_allocated_sn[3] = *p++;
-                break;
-            case routersOnSubnet :
-                p++;
-                opt_len = *p++;
-                DHCP_allocated_gw[0] = *p++;
-                DHCP_allocated_gw[1] = *p++;
-                DHCP_allocated_gw[2] = *p++;
-                DHCP_allocated_gw[3] = *p++;
-                p = p + (opt_len - 4);
-                break;
-            case dns :
-                p++;
-                opt_len = *p++;
-                DHCP_allocated_dns[0] = *p++;
-                DHCP_allocated_dns[1] = *p++;
-                DHCP_allocated_dns[2] = *p++;
-                DHCP_allocated_dns[3] = *p++;
-                p = p + (opt_len - 4);
-                break;
-            case dhcpIPaddrLeaseTime :
-                p++;
-                opt_len = *p++;
-                dhcp_lease_time  = *p++;
-                dhcp_lease_time  = (dhcp_lease_time << 8) + *p++;
-                dhcp_lease_time  = (dhcp_lease_time << 8) + *p++;
-                dhcp_lease_time  = (dhcp_lease_time << 8) + *p++;
-#ifdef _DHCP_DEBUG_
-                dhcp_lease_time = 10;
-#endif
-                break;
-            case dhcpServerIdentifier :
-                p++;
-                opt_len = *p++;
-                DHCP_SIP[0] = *p++;
-                DHCP_SIP[1] = *p++;
-                DHCP_SIP[2] = *p++;
-                DHCP_SIP[3] = *p++;
-                DHCP_REAL_SIP[0] = svr_addr[0];
-                DHCP_REAL_SIP[1] = svr_addr[1];
-                DHCP_REAL_SIP[2] = svr_addr[2];
-                DHCP_REAL_SIP[3] = svr_addr[3];
-                break;
-            default :
-                p++;
-                opt_len = *p++;
-                p += opt_len;
-                break;
-            } // switch
-        } // while
+            }
+            opt_len = p[1];
+            if ((e - (p + 2)) < (int32_t)opt_len) {
+                break;                            /* option overruns the message */
+            }
+            {
+                const uint8_t *v = p + 2;
+                switch (p[0]) {
+                case dhcpMessageType:
+                    if (opt_len >= 1U) { type = v[0]; }
+                    break;
+                case subnetMask:
+                    if (opt_len >= 4U) { DHCP_allocated_sn[0] = v[0]; DHCP_allocated_sn[1] = v[1]; DHCP_allocated_sn[2] = v[2]; DHCP_allocated_sn[3] = v[3]; }
+                    break;
+                case routersOnSubnet:
+                    if (opt_len >= 4U) { DHCP_allocated_gw[0] = v[0]; DHCP_allocated_gw[1] = v[1]; DHCP_allocated_gw[2] = v[2]; DHCP_allocated_gw[3] = v[3]; }
+                    break;
+                case dns:
+                    if (opt_len >= 4U) { DHCP_allocated_dns[0] = v[0]; DHCP_allocated_dns[1] = v[1]; DHCP_allocated_dns[2] = v[2]; DHCP_allocated_dns[3] = v[3]; }
+                    break;
+                case dhcpIPaddrLeaseTime:
+                    if (opt_len >= 4U) {
+                        dhcp_lease_time = ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) |
+                                          ((uint32_t)v[2] << 8) | (uint32_t)v[3];
+                    }
+                    break;
+                case dhcpServerIdentifier:
+                    if (opt_len >= 4U) {
+                        DHCP_SIP[0] = v[0]; DHCP_SIP[1] = v[1]; DHCP_SIP[2] = v[2]; DHCP_SIP[3] = v[3];
+                        DHCP_REAL_SIP[0] = svr_addr[0]; DHCP_REAL_SIP[1] = svr_addr[1];
+                        DHCP_REAL_SIP[2] = svr_addr[2]; DHCP_REAL_SIP[3] = svr_addr[3];
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+            p += 2U + opt_len;
+        }
     } // if
     return	type;
 }
@@ -1018,8 +1004,10 @@ int8_t check_DHCP_leasedIP(void) {
         // Received ARP reply or etc : IP address conflict occur, DHCP Failed
         send_DHCP_DECLINE();
 
-        ret = dhcp_tick_1s;
-        while ((dhcp_tick_1s - ret) < 2) ;  // wait for 1s over; wait to complete to send DECLINE message;
+        /* PLCBA_CPU: the original busy-wait on dhcp_tick_1s never ends when
+         * the same task drives DHCP_time_handler() (W5500Task). sendto() above
+         * already returned after SEND_OK (blocking UDP socket), so the DECLINE
+         * frame has left the chip: no wait needed. */
 
         return 0;
     }
